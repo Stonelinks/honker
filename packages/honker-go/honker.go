@@ -85,6 +85,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -337,6 +338,11 @@ func (w *updateWatcher) waitLoop() {
 		case 0:
 			continue
 		default:
+			// The watcher is gone for good: nothing will wake a subscriber
+			// again. Stream subscribers fall back to polling
+			// (streamPollFallback); this log line is how an operator learns
+			// it happened.
+			slog.Error("honker: commit watcher stopped", "code", int(code))
 			w.fire()
 			return
 		}
@@ -1031,6 +1037,13 @@ func (s *Stream) SubscribeFrom(ctx context.Context, startOffset int64) <-chan St
 	return ch
 }
 
+// streamPollFallback is how often an idle stream subscriber reads the stream
+// even though no commit woke it. With a live commit watcher it costs one
+// indexed read per idle subscriber per interval; with a dead one (waitLoop
+// returned) it turns permanent silence into a delay of at most this long.
+// A var so a test can shorten it.
+var streamPollFallback = 5 * time.Second
+
 // subscribeLoop pumps events into ch. A negative start means "resume from
 // consumer's saved offset"; a non-negative one starts there instead. An empty
 // consumer name never saves an offset.
@@ -1068,10 +1081,14 @@ func (s *Stream) subscribeLoop(ctx context.Context, consumer string, ch chan<- S
 		if len(events) > 0 {
 			continue
 		}
+		poll := time.NewTimer(streamPollFallback)
 		select {
 		case <-ctx.Done():
+			poll.Stop()
 			return
+		case <-poll.C:
 		case <-updateCh:
+			poll.Stop()
 			for {
 				select {
 				case <-updateCh:
