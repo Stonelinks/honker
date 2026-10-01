@@ -212,6 +212,51 @@ func TestStreamSubscribe(t *testing.T) {
 	}
 }
 
+func TestStreamSubscribeFrom(t *testing.T) {
+	extPath := findExtension(t)
+	dbPath := filepath.Join(t.TempDir(), "t.db")
+	db, err := Open(dbPath, extPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	s := db.Stream("subfrom")
+	var offs []int64
+	for i := 0; i < 3; i++ {
+		off, err := s.Publish(map[string]any{"i": i})
+		if err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		offs = append(offs, off)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ch := s.SubscribeFrom(ctx, offs[0])
+	for _, want := range offs[1:] {
+		select {
+		case ev := <-ch:
+			if ev.Offset != want {
+				t.Fatalf("expected offset %d, got %d", want, ev.Offset)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for offset %d", want)
+		}
+	}
+	cancel()
+	for range ch {
+	}
+
+	var rows int
+	if err := db.db.QueryRow("SELECT COUNT(*) FROM _honker_stream_consumers").Scan(&rows); err != nil {
+		t.Fatalf("count consumers: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("SubscribeFrom saved %d consumer offset rows, want 0", rows)
+	}
+}
+
 func TestListen(t *testing.T) {
 	extPath := findExtension(t)
 	dbPath := filepath.Join(t.TempDir(), "t.db")

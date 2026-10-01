@@ -1011,15 +1011,38 @@ func (s *Stream) GetOffset(consumer string) (int64, error) {
 // every 1000 events. Close on ctx cancel.
 func (s *Stream) Subscribe(ctx context.Context, consumer string) <-chan StreamEvent {
 	ch := make(chan StreamEvent, 16)
-	go s.subscribeLoop(ctx, consumer, ch)
+	go s.subscribeLoop(ctx, consumer, ch, -1)
 	return ch
 }
 
-func (s *Stream) subscribeLoop(ctx context.Context, consumer string, ch chan<- StreamEvent) {
+// SubscribeFrom returns a channel of stream events strictly after startOffset,
+// keeping the cursor in memory only: nothing is read from, or written to, the
+// consumer-offset table.
+//
+// It is the ephemeral counterpart of Subscribe. A durable worker wants a named,
+// persisted cursor so a restart misses nothing; a subscriber whose lifetime is
+// the connection (a websocket, a CLI tail) wants to start where it says,
+// persist nothing, and leave no row behind. Pair it with the stream's current
+// tail offset for "everything from now on". Same as subscribe(from_offset=...)
+// with no consumer in the Python binding.
+func (s *Stream) SubscribeFrom(ctx context.Context, startOffset int64) <-chan StreamEvent {
+	ch := make(chan StreamEvent, 16)
+	go s.subscribeLoop(ctx, "", ch, startOffset)
+	return ch
+}
+
+// subscribeLoop pumps events into ch. A negative start means "resume from
+// consumer's saved offset"; a non-negative one starts there instead. An empty
+// consumer name never saves an offset.
+func (s *Stream) subscribeLoop(ctx context.Context, consumer string, ch chan<- StreamEvent, start int64) {
 	defer close(ch)
-	offset, err := s.GetOffset(consumer)
-	if err != nil {
-		return
+	offset := start
+	if offset < 0 {
+		var err error
+		offset, err = s.GetOffset(consumer)
+		if err != nil {
+			return
+		}
 	}
 	lastSaved := offset
 	subID, updateCh := s.db.updates.subscribe()
@@ -1037,7 +1060,7 @@ func (s *Stream) subscribeLoop(ctx context.Context, consumer string, ch chan<- S
 			case ch <- ev:
 			}
 			offset = ev.Offset
-			if offset-lastSaved >= 1000 {
+			if consumer != "" && offset-lastSaved >= 1000 {
 				_, _ = s.SaveOffset(consumer, offset)
 				lastSaved = offset
 			}
