@@ -193,7 +193,18 @@ func OpenWithOptions(path string, extensionPath string, opts OpenOptions) (*Data
 			return nil
 		},
 	})
-	sqlDB, err := sql.Open(driverName, path)
+	// _txlock=immediate makes every database/sql transaction BEGIN IMMEDIATE.
+	// A deferred transaction that starts with a read and later upgrades to a
+	// write gets SQLITE_BUSY immediately on the upgrade (busy_timeout does not
+	// apply to lock upgrades), which surfaces as "database is locked" whenever
+	// two processes' write transactions race. Taking the write lock up front
+	// puts the wait under busy_timeout. The other bindings already begin
+	// immediate; this brings Go in line.
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	sqlDB, err := sql.Open(driverName, path+sep+"_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("open: %w", err)
 	}
